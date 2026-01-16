@@ -5,13 +5,16 @@ using System.Text;
 using Ordering.API.Infrastructure.Middleware;
 using Scalar.AspNetCore;
 using Serilog;
+using FluentValidation;
+using Ordering.API.Features.Auth.Login;
+using Ordering.API.Features.Auth.Register;
 
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
 // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
 builder.Services.AddOpenApi();
-
+builder.Services.AddValidatorsFromAssemblyContaining<Program>();
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<ITokenService, TokenService>();
 
@@ -69,5 +72,6 @@ app.MapGet("/health", () => Results.Ok(new
 
 app.UseAuthentication();
 app.UseAuthorization();
-
+app.MapLogin();
+app.MapRegister();
 app.Run();
