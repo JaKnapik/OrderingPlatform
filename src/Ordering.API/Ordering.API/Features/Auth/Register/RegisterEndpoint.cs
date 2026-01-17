@@ -44,7 +44,7 @@ public static class RegisterEndpoint
                 return Results.BadRequest(failure);
             }
 
-            await userManager.AddToRoleAsync(user, "User");
+            //await userManager.AddToRoleAsync(user, "User");
             var response = new RegisterResponse(Guid.Parse(user.Id), user.Email);
             return Results.Ok(Result.Success(response, "User registered successfully"));
         }

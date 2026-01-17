@@ -1,27 +1,85 @@
+using Azure.Identity;
+using FluentValidation;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
-using Ordering.API.Infrastructure.Auth;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
-using System.Text;
+using Ordering.API.Features.Auth.Login;
+using Ordering.API.Features.Auth.Register;
+using Ordering.API.Features.Orders.CreateOrder;
+using Ordering.API.Infrastructure.Auth;
+using Ordering.API.Infrastructure.Data;
 using Ordering.API.Infrastructure.Middleware;
 using Scalar.AspNetCore;
 using Serilog;
-using FluentValidation;
-using Ordering.API.Features.Auth.Login;
-using Ordering.API.Features.Auth.Register;
+using System.IdentityModel.Tokens.Jwt;
+using System.Text;
+using MassTransit;
 
+JwtSecurityTokenHandler.DefaultInboundClaimTypeMap.Clear();
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
-// Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
+var keyVaultUri = builder.Configuration["AzureKeyVault:Endpoint"];
+
+if (!string.IsNullOrEmpty(keyVaultUri))
+{
+    builder.Configuration.AddAzureKeyVault(new Uri(keyVaultUri), new DefaultAzureCredential());
+}
+else
+{
+    throw new Exception("No azure configuration");
+}
+var connectionString = builder.Configuration["DbConnectionString"];
+var jwtKey = builder.Configuration["Jwt:Key"];
+builder.Services.AddDbContext<OrderingContext>(
+    options => options.UseSqlServer(connectionString));
+builder.Services.AddMassTransit(x =>
+{
+	x.AddEntityFrameworkOutbox<OrderingContext>(o =>
+	{
+		o.UseSqlServer();
+		o.UseBusOutbox();
+	});
+
+	x.SetKebabCaseEndpointNameFormatter();
+
+	x.UsingAzureServiceBus((context, cfg) =>
+	{
+		cfg.Host(builder.Configuration["ServiceBus:ConnectionString"]);
+		cfg.UseMessageRetry(r => r.Exponential(
+			retryLimit: 4,
+			minInterval: TimeSpan.FromSeconds(1),
+			maxInterval: TimeSpan.FromSeconds(30),
+			intervalDelta: TimeSpan.FromSeconds(2)
+		));
+		cfg.ConfigureEndpoints(context);
+	});
+});
 builder.Services.AddOpenApi();
 builder.Services.AddValidatorsFromAssemblyContaining<Program>();
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<ITokenService, TokenService>();
 
+builder.Services.AddIdentity<ApplicationUser, IdentityRole>(options =>
+{
+	options.Password.RequireDigit = true;
+	options.Password.RequiredLength = 8;
+	options.Password.RequireNonAlphanumeric = false;
+	options.Password.RequireUppercase = true;
+	options.Password.RequireLowercase = true;
+}).AddEntityFrameworkStores<OrderingContext>()
+.AddDefaultTokenProviders();
+
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddProblemDetails();
 
-builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+builder.Services.AddAuthentication(options =>
+{
+	options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
+	options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
+	options.DefaultScheme = JwtBearerDefaults.AuthenticationScheme;
+})
     .AddJwtBearer(options =>
     {
         options.TokenValidationParameters = new TokenValidationParameters
@@ -34,7 +92,16 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             ValidAudience = builder.Configuration["Jwt:Audience"],
             IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(builder.Configuration["Jwt:Key"]!))
         };
-    });
+		options.Events = new JwtBearerEvents
+		{
+			OnAuthenticationFailed = context =>
+			{
+				Console.WriteLine("--- JWT AUTH FAILED ---");
+				Console.WriteLine($"Error: {context.Exception.Message}");
+				return Task.CompletedTask;
+			}
+		};
+	});
 
 builder.Services.AddAuthorization();
 builder.Host.UseSerilog((context, logger) =>
@@ -43,15 +110,20 @@ builder.Host.UseSerilog((context, logger) =>
     .Enrich.FromLogContext()
     .WriteTo.Console();
 });
-
+builder.Services.AddScoped<CreateOrderHandler>();
 var app = builder.Build();
 
 app.UseExceptionHandler();
 
-// Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
 {
-    app.MapOpenApi();
+	using (var scope = app.Services.CreateScope())
+	{
+		var dbContext = scope.ServiceProvider.GetRequiredService<OrderingContext>();
+		await dbContext.Database.MigrateAsync();
+		await DbSeeder.SeedAsync(dbContext);
+	}
+	app.MapOpenApi();
     app.MapScalarApiReference();
 }
 
@@ -74,4 +146,5 @@ app.UseAuthentication();
 app.UseAuthorization();
 app.MapLogin();
 app.MapRegister();
+app.MapCreateOrder();
 app.Run();
