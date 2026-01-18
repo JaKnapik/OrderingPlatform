@@ -16,11 +16,14 @@ using Serilog;
 using System.IdentityModel.Tokens.Jwt;
 using System.Text;
 using MassTransit;
+using OpenTelemetry.Trace;
+using OpenTelemetry.Resources;
 
 JwtSecurityTokenHandler.DefaultInboundClaimTypeMap.Clear();
 var builder = WebApplication.CreateBuilder(args);
 
 var keyVaultUri = builder.Configuration["AzureKeyVault:Endpoint"];
+var serviceName = "Ordering.API";
 
 if (!string.IsNullOrEmpty(keyVaultUri))
 {
@@ -55,6 +58,18 @@ builder.Services.AddMassTransit(x =>
 		));
 		cfg.ConfigureEndpoints(context);
 	});
+});
+builder.Services.AddOpenTelemetry().WithTracing(tracing =>
+{
+    tracing.SetResourceBuilder(ResourceBuilder.CreateDefault().AddService(serviceName))
+    .AddAspNetCoreInstrumentation()
+    .AddHttpClientInstrumentation()
+    .AddEntityFrameworkCoreInstrumentation()
+    .AddSqlClientInstrumentation()
+    .AddSource("MassTransit")
+    .AddOtlpExporter(op =>
+        op.Endpoint = new Uri(builder.Configuration["OTEL_EXPORTER_OTLP_ENDPOINT"] ?? "http://localhost:4317")
+    );
 });
 builder.Services.AddOpenApi();
 builder.Services.AddValidatorsFromAssemblyContaining<Program>();
